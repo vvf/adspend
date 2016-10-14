@@ -6,14 +6,13 @@ import (
 	"github.com/gin-gonic/gin"
 	as "github.com/aerospike/aerospike-client-go"
 	"net/http"
-	"webformula/models"
+	"adspend/models"
 )
 
-var serverHost = "192.168.77.50"
-var serverPort = 3000
-var namespace = "test"
-var setName = "adspend"
-var binName = "traffic"
+const serverHost = "192.168.77.50"
+const serverPort = 3000
+const namespace = "test"
+const setName = "adspend"
 
 const gig int64 = 1000000000
 
