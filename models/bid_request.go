@@ -5,22 +5,17 @@ import (
 )
 
 type BidRequest struct {
-	Domain string `json:"domain"`
-	PageURL string `json:"pageURL"`
-	DomainTopic  string `json:"domainTopic"`
-	PageTopic  string `json:"pageTopic"`
-	BannerSize  string `json:"bannerSize"`
-	DeviceType  string `json:"deviceType"`
-	Country  string `json:"country"`
-	City  string `json:"city"`
-	OS string `json:"os"`
-	UserAgent  string `json:"userAgent"`
-	//UserId  string `json:"userId"`
-	//UserCategory  string `json:"userCategory"`
-	//DomainMinFloor  string `json:"domainMinFloor"`
-	//SSP  string `json:"ssp"`
-	//TrafficType  string `json:"trafficType"`
-	//MobileOperator  string `json:"mobileOperator"`
-	//Coverage int32 `json:"coverage",omitempty`
-	Timestamp time.Time
+	UserId  string `json:"userId"`
+	SSP  string `json:"ssp"`
+	Timestamp time.Time `json:"timestamp"`
+	Action string `json:"action"`
+	Host string `json:"action"`
+       	Path string `json:"path"`
+       	Query string `json:"query"`
+       	Ip string `json:"ip"`
+       	Ua string `json:"ua"`
+       	SeatID string `json:"seatID"`
+       	CreativeSize string `json:"creativeSize"`
+       	CreativeType string `json:"creativeType"`
+       	Geo string `json:"geo"`
 }
