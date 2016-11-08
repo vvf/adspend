@@ -62,11 +62,12 @@ func Post(c *gin.Context) {
 
 		if err := client.PutObject(policy, key, &record); err == nil {
 			response.Success = true
+			c.JSON(http.StatusOK, response)
 		} else {
 			response.Success = false
 			response.Message = "Error in put bin:" + string(err.Error())
+			c.JSON(http.StatusInternalServerError, response)
 		}
-		c.JSON(http.StatusOK, response)
 	} else {
 		response.Success = false
 		response.Message = err.Error()
@@ -148,7 +149,7 @@ func CreateHandler(field string, aggregateFnName string) gin.HandlerFunc {
 				for res := range asResults {
 					data = append(data, res)
 					cnt++
-					if cnt > LIMIT {
+					if cnt >= LIMIT {
 						result["isPartial"] = true
 						break
 					}
