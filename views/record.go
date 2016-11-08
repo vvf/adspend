@@ -8,35 +8,59 @@ import (
 	as "github.com/aerospike/aerospike-client-go"
 	"strings"
 	"strconv"
+	"os"
+	"github.com/aerospike/aerospike-client-go/logger"
 )
 
 const namespace = "test"
 const setName = "adspend"
 
+const LIMIT = 1000
 const GIG int64 = 1000000000
 
-type RecordView struct {
-	Client *as.Client
-	Policy *as.WritePolicy
+var client *as.Client
+var policy *as.WritePolicy
+
+func Init(c *as.Client) error {
+	client = c
+	policy = as.NewWritePolicy(0, 0)
+	policy.Timeout = 50 * time.Millisecond  // 50 millisecond timeout.
+	policy.Expiration = 3600 * 24 * 60 // 60 days NB! this is time how long records will be store
+
+	// create indexes
+	for _, field := range GetFilteringFields() {
+		task, err := client.CreateIndex(policy, namespace, setName, field + "Index", field, as.STRING)
+		if err == nil {
+			err = <-task.OnComplete()
+		}
+		if err != nil {
+			logger.Logger.Logger.Printf(err.Error())
+		}
+	}
+
+	// register UDF
+	luaPath, _ := os.Getwd()
+	luaPath += "/udfs/"
+	as.SetLuaPath(luaPath)
+	task, err := client.RegisterUDFFromFile(policy, luaPath + "record_udfs.lua", "record_udfs.lua", as.LUA)
+	if err != nil {
+		return err
+	}
+	<-task.OnComplete()
+	return nil
 }
 
-func (rv RecordView) Init() {
-	rv.Policy = as.NewWritePolicy(0, 0)
-	rv.Policy.Timeout = 50 * time.Millisecond  // 50 millisecond timeout.
-	rv.Policy.Expiration = 3600 * 24 * 60 // 60 days NB! this is time how long records will be store
-}
-
-func (rv RecordView) Post(c *gin.Context) {
+func Post(c *gin.Context) {
 	var response struct {
 		Success bool
 		Message string
 	}
 	var record models.BidRequest
-	if c.BindJSON(&record) == nil {
+	if err := c.BindJSON(&record); err == nil {
 		record.Timestamp = time.Now()
 		key, _ := as.NewKey(namespace, setName, record.Timestamp.Format(time.ANSIC))
 
-		if err := rv.Client.PutObject(rv.Policy, key, &record); err == nil {
+		if err := client.PutObject(policy, key, &record); err == nil {
 			response.Success = true
 		} else {
 			response.Success = false
@@ -45,68 +69,102 @@ func (rv RecordView) Post(c *gin.Context) {
 		c.JSON(http.StatusOK, response)
 	} else {
 		response.Success = false
-		response.Message = ""
+		response.Message = err.Error()
 		c.JSON(http.StatusNotAcceptable, response)
 	}
 }
 
-func (rv RecordView) CreateHandler(field string, aggregateFnName string) gin.HandlerFunc {
+func addRangeFilter(stmt *as.Statement, field string, filterBy string) error {
+	filterValues := strings.Split(filterBy, "-")
+	var tsFrom int64
+	var tsTo int64
+	if filterValues[0] != "" {
+		if ts, err := strconv.Atoi(filterValues[0]); err != nil {
+			return err
+		} else {
+			tsFrom = int64(ts)
+		}
+	} else {
+		tsFrom = 0
+	}
+	if filterValues[1] != "" {
+		if ts, err := strconv.Atoi(filterValues[1]); err != nil {
+			return err
+		} else {
+			tsTo = int64(ts)
+		}
+	} else {
+		tsTo = 0xFFFFFFFF
+	}
+
+	stmt.Addfilter(as.NewRangeFilter(field, tsFrom * GIG, (tsTo + 1) * GIG))
+	return nil
+}
+
+func CreateHandler(field string, aggregateFnName string) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		filterBy := c.Param("filter")
-		result := gin.H{"field": field, "filterBy": filterBy, "ts": time.Now().Unix() }
-		data := make([]interface{}, 0, 20)
+		filter := c.Param("filter")
+		result := gin.H{"field": field, "filterValue": filter, "ts": time.Now().Unix() }
 		stmt := as.NewStatement(namespace, setName)
 		asResults := make(chan *models.BidRequest, 10)
-		if strings.Contains(filterBy, "-") && field == "Timestamp" {
-			filterValues := strings.Split(filterBy, "-")
-			var tsFrom int64
-			var tsTo int64
-			var err error
-			if filterValues[0] != "" {
-				if tsFrom, err = strconv.Atoi(filterValues[0]); err != nil {
-					c.JSON(http.StatusInternalServerError, gin.H{"error": err})
-					return
-				}
-			} else {
-				tsFrom = 0
+		if strings.Contains(filter, "-") && field == "Timestamp" {
+			if err := addRangeFilter(stmt, field, filter); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err})
+				return
 			}
-			if filterValues[1] != "" {
-				if tsTo, err = strconv.Atoi(filterValues[1]); err != nil {
-					c.JSON(http.StatusInternalServerError, gin.H{"error": err})
-					return
-				}
-			} else {
-				tsTo = 0xFFFFFFFF
-			}
-
-			stmt.Addfilter(as.NewRangeFilter(field, tsFrom * GIG, (tsTo + 1) * GIG))
 		} else {
-			stmt.Addfilter(as.NewEqualFilter(field, filterBy))
+			stmt.Addfilter(as.NewEqualFilter(field, filter))
 		}
 
 		if aggregateFnName != "no" {
 			result["aggregate"] = aggregateFnName
-		}
-		_, err := rv.Client.QueryObjects(nil, stmt, asResults)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err})
-			return
-		} else {
-			for res := range asResults {
-				pk := len(data)
-				data = data[:pk + 1]
-				data[pk] = res
+			rs, err := client.QueryAggregate(nil, stmt, "record_udfs", aggregateFnName)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err})
+				return
 			}
-			result["data"] = data
+			select {
+			case rec := <-rs.Records:
+				if rec != nil {
+					result["data"] = rec.Bins["SUCCESS"]
+				} else {
+					result["data"] = 0
+				}
+				break
+			case err := <-rs.Errors:
+				if err != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": err})
+					return
+				}
+			}
+		} else {
+			_, err := client.QueryObjects(nil, stmt, asResults)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err})
+				return
+			} else {
+				data := make([]*models.BidRequest, 0, 10)
+				cnt := 0
+				for res := range asResults {
+					data = append(data, res)
+					cnt++
+					if cnt > LIMIT {
+						result["isPartial"] = true
+						break
+					}
+				}
+				result["data"] = data
+				result["count"] = cnt
+			}
 		}
 		c.JSON(200, result)
 	}
 }
 
-func (rv RecordView) GetFilteringFields() []string {
+func GetFilteringFields() []string {
 	return []string{"Timestamp", "Action", "SSP"}
 }
 
-func (rv RecordView) GetAggragateFnNames() []string {
-	return []string{"Count", "Max", "Min"}
+func GetAggragateFnNames() []string {
+	return []string{"Count"}
 }

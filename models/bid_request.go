@@ -9,7 +9,7 @@ type BidRequest struct {
 	SSP  string `json:"ssp"`
 	Timestamp time.Time `json:"timestamp"`
 	Action string `json:"action"`
-	Host string `json:"action"`
+	Host string `json:"host"`
        	Path string `json:"path"`
        	Query string `json:"query"`
        	Ip string `json:"ip"`

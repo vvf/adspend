@@ -21,16 +21,18 @@ func main() {
 		log.Print("Error:\n")
 		log.Fatalln(err.Error())
 	} else {
-
-		recordView := views.RecordView{client, nil}
-		recordView.Init()
-		router.POST("/record", recordView.Post)
-		for _, field := range recordView.GetFilteringFields() {
-			router.GET("/record/" + field + "/:filter", recordView.CreateHandler(field, "no"))
-			for _, aggregateFn := range recordView.GetAggragateFnNames() {
+		if err:=views.Init(client); err != nil{
+			log.Print("Error:\n")
+			log.Fatalln(err.Error())
+			return
+		}
+		router.POST("/record", views.Post)
+		for _, field := range views.GetFilteringFields() {
+			router.GET("/record/" + field + "/:filter", views.CreateHandler(field, "no"))
+			for _, aggregateFn := range views.GetAggragateFnNames() {
 				router.GET(
 					"/record/" + field + "/:filter/" + aggregateFn,
-					recordView.CreateHandler(field, aggregateFn))
+					views.CreateHandler(field, aggregateFn))
 			}
 		}
 
