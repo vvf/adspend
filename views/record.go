@@ -40,7 +40,7 @@ func Init(c *as.Client) error {
 
 	// register UDF
 	luaPath, _ := os.Getwd()
-	luaPath += "/udfs/"
+	luaPath += "/src/adspend/udfs/"
 	as.SetLuaPath(luaPath)
 	task, err := client.RegisterUDFFromFile(policy, luaPath + "record_udfs.lua", "record_udfs.lua", as.LUA)
 	if err != nil {
