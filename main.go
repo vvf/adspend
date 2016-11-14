@@ -29,12 +29,18 @@ func main() {
 		router.POST("/record", views.Post)
 		for _, field := range views.GetFilteringFields() {
 			router.GET("/record/" + field + "/:filter", views.CreateHandler(field, "no"))
-			for _, aggregateFn := range views.GetAggragateFnNames() {
+			for aggregateFn, aggregateConfig := range views.GetAggregateFnNames() {
+				route := "/record/" + field + "/:filter/" + aggregateFn
+					if aggregateConfig.HasParam {
+					route += "/:param"
+				}
 				router.GET(
-					"/record/" + field + "/:filter/" + aggregateFn,
+					route,
 					views.CreateHandler(field, aggregateFn))
 			}
 		}
+
+		router.GET("/record/valuesOf/:field", views.ValuesOf)
 
 		router.Run(":3300")
 	}

@@ -51,27 +51,18 @@ func Init(c *as.Client) error {
 }
 
 func Post(c *gin.Context) {
-	var response struct {
-		Success bool
-		Message string
-	}
 	var record models.BidRequest
 	if err := c.BindJSON(&record); err == nil {
 		record.Timestamp = time.Now()
 		key, _ := as.NewKey(namespace, setName, record.Timestamp.Format(time.ANSIC))
 
 		if err := client.PutObject(policy, key, &record); err == nil {
-			response.Success = true
-			c.JSON(http.StatusOK, response)
+			c.JSON(http.StatusOK, gin.H{"error": nil})
 		} else {
-			response.Success = false
-			response.Message = "Error in put bin:" + string(err.Error())
-			c.JSON(http.StatusInternalServerError, response)
+			c.JSON(http.StatusOK, gin.H{"error": err})
 		}
 	} else {
-		response.Success = false
-		response.Message = err.Error()
-		c.JSON(http.StatusNotAcceptable, response)
+		c.JSON(http.StatusOK, gin.H{"error": err})
 	}
 }
 
@@ -102,15 +93,74 @@ func addRangeFilter(stmt *as.Statement, field string, filterBy string) error {
 	return nil
 }
 
+type ConvertToResultFn (func(rec *as.Record, result gin.H))
+
+func convertFromMap(rec *as.Record, result gin.H) {
+	r1 := rec.Bins["SUCCESS"].(map[interface{}]interface{})
+	if r1 == nil {
+		result["data"] = nil
+		result["count"] = 0
+	} else {
+		asResults := make(map[string]interface{}, len(r1))
+		cnt := 0
+		for v, c := range r1 {
+			if v == nil {
+				asResults["[null]"] = c
+				result["warning"] = "Is field name valid?"
+			} else {
+				asResults[v.(string)] = c
+			}
+			cnt ++
+			if cnt >= LIMIT {
+				result["isPartial"] = true
+				break
+			}
+		}
+		result["data"] = asResults
+		result["count"] = cnt
+	}
+}
+func getConvertValueToAggregateFnName(aggregateFnName string) ConvertToResultFn {
+	return func(rec *as.Record, result gin.H) {
+		result[aggregateFnName] = rec.Bins["SUCCESS"]
+		result["data"] = []interface{}{rec.Bins["SUCCESS"]}
+		result["count"] = 1
+	}
+}
+
+func ValuesOf(c *gin.Context) {
+	field := c.Param("field")
+	result := gin.H{"field": field, "ts": time.Now().Unix(), "error": nil }
+	stmt := as.NewStatement(namespace, setName)
+	rs, err := client.QueryAggregate(nil, stmt, "record_udfs", "ValuesOf", field)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err})
+		return
+	}
+	result[field] = nil
+	select {
+	case rec := <-rs.Records:
+		if rec != nil {
+			convertFromMap(rec, result)
+		}
+		break
+	case err := <-rs.Errors:
+		if err != nil {
+			c.JSON(200, gin.H{"error": err})
+			return
+		}
+	}
+	c.JSON(http.StatusOK, result)
+
+}
 func CreateHandler(field string, aggregateFnName string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		filter := c.Param("filter")
-		result := gin.H{"field": field, "filterValue": filter, "ts": time.Now().Unix() }
+		result := gin.H{"field": field, "filterValue": filter, "ts": time.Now().Unix(), "error": nil }
 		stmt := as.NewStatement(namespace, setName)
-		asResults := make(chan *models.BidRequest, 10)
 		if strings.Contains(filter, "-") && field == "Timestamp" {
 			if err := addRangeFilter(stmt, field, filter); err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": err})
+				c.JSON(http.StatusOK, gin.H{"error": err})
 				return
 			}
 		} else {
@@ -119,29 +169,37 @@ func CreateHandler(field string, aggregateFnName string) gin.HandlerFunc {
 
 		if aggregateFnName != "no" {
 			result["aggregate"] = aggregateFnName
-			rs, err := client.QueryAggregate(nil, stmt, "record_udfs", aggregateFnName)
+			var param string = ""
+			if !!aggregatesFnConfig[aggregateFnName].HasParam {
+				param = c.Param("param")
+			}
+			rs, err := client.QueryAggregate(nil, stmt, "record_udfs", aggregateFnName, param)
 			if err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": err})
 				return
 			}
+			result[aggregateFnName] = 0
 			select {
 			case rec := <-rs.Records:
 				if rec != nil {
-					result["data"] = rec.Bins["SUCCESS"]
-				} else {
-					result["data"] = 0
+					convertFn := aggregatesFnConfig[aggregateFnName].convertFn
+					if convertFn == nil {
+						convertFn = getConvertValueToAggregateFnName(aggregateFnName)
+					}
+					convertFn(rec, result)
 				}
 				break
 			case err := <-rs.Errors:
 				if err != nil {
-					c.JSON(http.StatusInternalServerError, gin.H{"error": err})
+					c.JSON(200, gin.H{"error": err})
 					return
 				}
 			}
 		} else {
+			asResults := make(chan *models.BidRequest, 10)
 			_, err := client.QueryObjects(nil, stmt, asResults)
 			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": err})
+				c.JSON(200, gin.H{"error": err})
 				return
 			} else {
 				data := make([]*models.BidRequest, 0, 10)
@@ -166,6 +224,26 @@ func GetFilteringFields() []string {
 	return []string{"Timestamp", "Action", "SSP"}
 }
 
-func GetAggragateFnNames() []string {
-	return []string{"Count"}
+type AggregateConfig struct {
+	HasParam  bool
+	convertFn ConvertToResultFn
+}
+
+var aggregatesFnConfig map[string]AggregateConfig
+
+func init() {
+	aggregatesFnConfig = map[string]AggregateConfig{
+		"Count": {
+			HasParam:false,
+			convertFn: getConvertValueToAggregateFnName("Count"),
+		},
+		"ValuesOf": {
+			HasParam: true,
+			convertFn: convertFromMap,
+		},
+	}
+}
+
+func GetAggregateFnNames() map[string]AggregateConfig {
+	return aggregatesFnConfig
 }
